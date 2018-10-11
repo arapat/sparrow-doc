@@ -312,6 +312,8 @@ END
 
 A background thread keep receiving newly sampled examples from the stratified storage, and replace current sample once sufficient new samples are gathered.
 
+![](https://www.lucidchart.com/publicSegments/view/e864d382-6920-48bf-acb5-9389e15f7854/image.png)
+
 ```
 Procedure StartSampledExamplesGatherer(SampledExamplesQueue):
   <Run this procedure in an independent thread>
