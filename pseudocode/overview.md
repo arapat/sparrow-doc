@@ -7,13 +7,13 @@
   * [Sampled Example](#sampledexample)
   * [Scored Example](#scoredexample)
   * [Tree](#tree)
-* [Key Components and Operations](#key-components-and-operations)
-  * [Run Sparrow](#run-sparrow)
-  * [BufferLoader](#bufferloader)
-  * [StratifiedStorage](#stratifiedstorage)
-  * [Booster](#booster)
+* [System Entrance](#system-entrance)
+* [StratifiedStorage](#stratifiedstorage)
+* [Scanner](#scanner)
+   * [BufferLoader](#bufferloader)
+   * [Booster](#booster)
 
-![System Design](https://www.lucidchart.com/publicSegments/view/e4b4d91a-c1ce-477a-a304-1492e341d8a4/image.png)
+![System Design](https://www.lucidchart.com/publicSegments/view/836caf8e-7af9-4af6-9a84-af70249ca153/image.png)
 
 ## Basic data types
 
@@ -67,7 +67,7 @@ Tree := Array[Node1, Node2, ...]
 * `Prediction`: The prediction of the tree nodes.
 * `LeftChildIndex`, `RightChildIndex`: The indices of the left and right children of the tree nodes.
 
-## Key Components and Operations
+## System Entrance
 
 ### Run Sparrow
 
@@ -90,92 +90,7 @@ END
 ```
 
 
-### BufferLoader
-
-`BufferLoader` is an in-memory data loader to efficiently provide training examples to the learning algorithm. It maintains a weighted sample of the training dataset with regard to the latest ensemble model. In a separate thread, it constantly gather newly sampled examples from the stratified storage to replace its current sample set.
-
-#### Structure
-
-```
-BufferLoader := (Size, BatchSize, LoadedData, LoadingData, ESS)
-LoadedData   := CircularQueue[SampledExample1, SampledExample2, ...]
-LoadingData  := <same as LoadedData>
-```
-
-* `Size`: The capacity of the BufferLoader
-* `BatchSize`: The size of a batch when reading from BufferLoader.
-* `ESS`: The effective sample size of the current sample set.
-
-Instead of reading one at a time, the learning algorithm (booster) can read a small batch of examples from the BufferLoader at a time to take advantage of multi-threading in the subsequent computations.
-
-* `LoadedData`: The array of the sampled training examples in memory. BufferLoader returns examples as reading from a circular queue, namely, the first example would be returned next after reading the last example.
-
-#### Methods
-
-Return next batch of examples
-
-```
-Procedure GetNextBatch():
-  IF LoadingData IS READY DO
-    LoadedData = LoadingData
-    <Set LoadingData as NOT READY>
-  END
-
-  Batch = <Read next BatchSize examples from LoadedData>
-  RETURN Batch
-END
-```
-
-Update the scores of all examples after a new rule is added to the ensemble.
-
-```
-Procedure UpdateScores(Model):
-  ModelSize = <Number of Trees in Model>
-  FOR SampledExample IN LoadedData DO
-    FOR Tree IN Model[SampledExample.LastTreeIndex...ModelSize] DO
-      SampledExample.LastScore += Tree.Predict(SampledExample.LabeledData.Feature)
-    END
-    SampledExample.LastTreeIndex = ModelSize
-  END
-END
-```
-
-Update effective sample size of current sample.
-
-```
-Procedure UpdateESS():
-  SumOfWeights = 0
-  SumOfWeightSquared = 0
-  FOR SampledExample IN LoadedData DO
-    W = GetWeight(LoadedData.LabeledData.Label, LoadedData.LastScore)
-    SumOfWeights += W
-    SumOfWeightSquared += W * W
-  END
-  EffectiveSize = (SumOfWeights * SumOfWeights) / SumOfWeightSquared
-  LoadedDataSize = <Number of entries in LoadedData>
-  RETURN EffectiveSize / LoadedDataSize
-END
-```
-
-A background thread keep receiving newly sampled examples from the stratified storage, and replace current sample once sufficient new samples are gathered.
-
-```
-Procedure StartSampledExamplesGatherer(SampledExamplesQueue):
-  <Run this procedure in an independent thread>
-  WHILE True DO
-    WHILE <Size of LoadingData> < Size DO
-      SampledExample = SampledExamplesQueue.BlockingRead()
-      LoadingData.Append(SampledExample)
-    END
-
-    <Shuffle LoadingData>
-    <Set LoadingData as READY>
-  END
-END
-```
-
-
-### StratifiedStorage
+## StratifiedStorage
 
 `StratifiedStorage` maintains a large volume of training examples
 (more than the memory can fit) on disk.
@@ -284,6 +199,91 @@ Procedure StratumDequeue():
 END
 ```
 
+## Scanner
+
+### BufferLoader
+
+`BufferLoader` is an in-memory data loader to efficiently provide training examples to the learning algorithm. It maintains a weighted sample of the training dataset with regard to the latest ensemble model. In a separate thread, it constantly gather newly sampled examples from the stratified storage to replace its current sample set.
+
+#### Structure
+
+```
+BufferLoader := (Size, BatchSize, LoadedData, LoadingData, ESS)
+LoadedData   := CircularQueue[SampledExample1, SampledExample2, ...]
+LoadingData  := <same as LoadedData>
+```
+
+* `Size`: The capacity of the BufferLoader
+* `BatchSize`: The size of a batch when reading from BufferLoader.
+* `ESS`: The effective sample size of the current sample set.
+
+Instead of reading one at a time, the learning algorithm (booster) can read a small batch of examples from the BufferLoader at a time to take advantage of multi-threading in the subsequent computations.
+
+* `LoadedData`: The array of the sampled training examples in memory. BufferLoader returns examples as reading from a circular queue, namely, the first example would be returned next after reading the last example.
+
+#### Methods
+
+Return next batch of examples
+
+```
+Procedure GetNextBatch():
+  IF LoadingData IS READY DO
+    LoadedData = LoadingData
+    <Set LoadingData as NOT READY>
+  END
+
+  Batch = <Read next BatchSize examples from LoadedData>
+  RETURN Batch
+END
+```
+
+Update the scores of all examples after a new rule is added to the ensemble.
+
+```
+Procedure UpdateScores(Model):
+  ModelSize = <Number of Trees in Model>
+  FOR SampledExample IN LoadedData DO
+    FOR Tree IN Model[SampledExample.LastTreeIndex...ModelSize] DO
+      SampledExample.LastScore += Tree.Predict(SampledExample.LabeledData.Feature)
+    END
+    SampledExample.LastTreeIndex = ModelSize
+  END
+END
+```
+
+Update effective sample size of current sample.
+
+```
+Procedure UpdateESS():
+  SumOfWeights = 0
+  SumOfWeightSquared = 0
+  FOR SampledExample IN LoadedData DO
+    W = GetWeight(LoadedData.LabeledData.Label, LoadedData.LastScore)
+    SumOfWeights += W
+    SumOfWeightSquared += W * W
+  END
+  EffectiveSize = (SumOfWeights * SumOfWeights) / SumOfWeightSquared
+  LoadedDataSize = <Number of entries in LoadedData>
+  RETURN EffectiveSize / LoadedDataSize
+END
+```
+
+A background thread keep receiving newly sampled examples from the stratified storage, and replace current sample once sufficient new samples are gathered.
+
+```
+Procedure StartSampledExamplesGatherer(SampledExamplesQueue):
+  <Run this procedure in an independent thread>
+  WHILE True DO
+    WHILE <Size of LoadingData> < Size DO
+      SampledExample = SampledExamplesQueue.BlockingRead()
+      LoadingData.Append(SampledExample)
+    END
+
+    <Shuffle LoadingData>
+    <Set LoadingData as READY>
+  END
+END
+```
 
 
 ### Booster
