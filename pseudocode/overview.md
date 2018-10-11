@@ -1,5 +1,18 @@
 # Sparrow Pseudocode
 
+## Table of Contents
+
+* [Basic Data Types](#basic-data-types)
+  * [Labeled Data](#labeleddata)
+  * [Sampled Example](#sampledexample)
+  * [Scored Example](#scoredexample)
+  * [Tree](#tree)
+* [Key Components and Operations](#key-components-and-operations)
+  * [Run Sparrow](#run-sparrow)
+  * [BufferLoader](#bufferloader)
+  * [StratifiedStorage](#stratifiedstorage)
+  * [Booster](#booster)
+
 ![System Design](https://www.lucidchart.com/publicSegments/view/e4b4d91a-c1ce-477a-a304-1492e341d8a4/image.png)
 
 ## Basic data types
