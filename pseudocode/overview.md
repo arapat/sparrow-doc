@@ -121,9 +121,11 @@ END
 (more than the memory can fit) on disk.
 It organizes examples into strata according to the weights of the examples with regard to the latest ensemble.
 
+![](https://www.lucidchart.com/publicSegments/view/d832c410-9f5a-409c-8dc0-12597b9f17ad/image.png)
+
 #### Structure
 
-At showed in the [diagram](#system-design), a stratum maintains two in-memory buffer for each stratum: one for storing examples that are waiting to be written back to disk (`InQueue`), and the other for storing examples that are loaded into memory for the samplers to sample from (`OutQueue`).
+At showed in the diagram above, a stratum maintains two in-memory buffer for each stratum: one for storing examples that are waiting to be written back to disk (`InQueue`), and the other for storing examples that are loaded into memory for the samplers to sample from (`OutQueue`).
 
 Strata for different weight ranges are organizes in a Map structure (`StratumMap`).
 
@@ -198,6 +200,8 @@ END
 #### Low Level Procedures for Maintaining a Single Stratum
 
 There are two threads running for the strata, one for writing examples in the `InQueue` back to disk, the other for loading examples from disk to the `OutQueue`. Both queues have fixed size, so once they are full, the corresponding threads would pause and wait for their availabilities.
+
+![](https://www.lucidchart.com/publicSegments/view/a4186e63-36be-4f2c-afee-65d973691d99/image.png)
 
 ```
 Procedure StratumEnqueue():
