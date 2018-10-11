@@ -1,7 +1,8 @@
-# Sparrow Pseudocode
+# Sparrow Design and Pseudocode
 
 ## Table of Contents
 
+* [System Design](#system-design)
 * [Basic Data Types](#basic-data-types)
   * [Labeled Data](#labeleddata)
   * [Sampled Example](#sampledexample)
@@ -13,13 +14,19 @@
    * [BufferLoader](#bufferloader)
    * [Booster](#booster)
 
+## System Design
+
 ![System Design](https://www.lucidchart.com/publicSegments/view/836caf8e-7af9-4af6-9a84-af70249ca153/image.png)
 
 ## Basic data types
 
+There are two major data structure in Sparrow, one describes training/testing examples, the other describes an individual tree in the ensemble.
+
 ### LabeledData
 
 #### Structure
+
+An example consists of two components, Feature and Label.
 
 ```
 LabeledData := (Feature, Label)
@@ -28,11 +35,34 @@ LabeledData := (Feature, Label)
 * **Feature**: Represents a set of binary features compiled for a raw example.
 * **Label**: Either +1 or -1 (for binary classification)
 
+In addition, there are two scenarios in which the examples can be associated with scores (predictions) from some
+version of the trained model.
+
+
+### ScoredExample
+
+When an example is stored on disk (more strictly, in [StratifiedStorage](#stratifiedstorage)),
+there is one score associated with it, which is the score predicted by lastest model when Sparrow accessed this
+example last time.
+
+Suppose when Sparrow accesses a specific example `x` for the first time, the lastest model `M` consists of `K` rules.
+The example receives a score `M(x) = z`, sets `LastScore=z`, and `LastTreeIndex=K`.
+
+Suppose when Sparrow accesses the example `x` for the second time, the latest model `M'` consists of `K'` rules.
+Sparrow will update the score of `x` by querying only the recent `K'-LastTreeIndex` rules added to `M'` since `M`,
+and thus speed-up the evaluation process.
+
+```
+ScoredExample := (LabeledData, LastScore, LastTreeIndex)
+```
+
+
 ### SampledExample
 
-Define an example in its compressed form for _training_.
-This is the format of examples in BufferLoader (defined below).
-The inner-loop of Sparrow iterates over tables with SampledExample as rows.
+The examples are represented in this format in BufferLoader (see [BufferLoader](#bufferloader)).
+This is also the format used in the inner-loop of Sparrow, in which the [Booster](#booster) iterates over tables with SampledExample as rows.
+
+There are two scores associated with the example. One is the score of the example when it was sampled, the other is its last updated score (the later is more recent than the former).
 
 ```
 SampledExample := (LabeledData, SampledScore, SampledTreeIndex, LastScore, LastTreeIndex)
@@ -44,14 +74,6 @@ SampledExample := (LabeledData, SampledScore, SampledTreeIndex, LastScore, LastT
    * `Sampled-` corresponds to time at which this example was sampled
    * `Last-` corresponds to the last time the weight of this example was updated.
 
-### ScoredExample
-
-Define an example in its compressed form for _sampling_.
-This is the format of examples in StratifiedStorage (defined below).
-
-```
-ScoredExample := (LabeledData, LastScore, LastTreeIndex)
-```
 
 ### Tree
 
@@ -67,11 +89,13 @@ Tree := Array[Node1, Node2, ...]
 * `Prediction`: The prediction of the tree nodes.
 * `LeftChildIndex`, `RightChildIndex`: The indices of the left and right children of the tree nodes.
 
+
 ## System Entrance
 
 ### Run Sparrow
 
-There are three key components of Sparrow: the stratified storage, the buffered loader, and the learning algorithm. Their internal implementations are discussed later.
+There are three key components of Sparrow: the stratified storage, the buffered loader, and the learning algorithm.
+They execute in separate threads in an asynchronous manner.
 
 ```
 Procedure RunSparrow():
@@ -81,7 +105,8 @@ Procedure RunSparrow():
 END
 ```
 
-We also need to define a function that computes the weight of an example given its label and its score given by the ensemble.
+All three components require a function for evaluating the weight of an example
+given its label and its score predicted by the ensemble.
 
 ```
 Procedure GetWeight(Label, Score):
@@ -98,21 +123,27 @@ It organizes examples into strata according to the weights of the examples with 
 
 #### Structure
 
+At showed in the [diagram](#system-design), a stratum maintains two in-memory buffer for each stratum: one for storing examples that are waiting to be written back to disk (`InQueue`), and the other for storing examples that are loaded into memory for the samplers to sample from (`OutQueue`).
+
+Strata for different weight ranges are organizes in a Map structure (`StratumMap`).
+
+Lastly, there are three queue for message passing between different threads.
+
+* `UpdatedExamplesQueue`: The queue for passing the training examples with updated scores between the Samplers
+and the Assigners.
+* `SampledExamplesQueue`: The queue for passing the sampled examples between the Samplers and the BufferLoader.
+* `LastModelQueue`: The queue for passing the latest model between the Booster and the Samplers.
+
 ```
-Stratum           := (IncomingMemBuffer, SlotIndices, OutgoingMemBuffer)
+Stratum           := (InQueue, SlotIndices, OutQueue)
 StratumMap        := Map(StratumIndex1 => Stratum1, StratumIndex2 => Stratum2, ...)
 Strata            := (DiskBuffer, NumExamplesPerSlot, StratumMap)
 StratifiedStorage := (Strata, WeightsTable, UpdatedExamplesQueue, SampledExamplesQueue, LastModelQueue)
 ```
 
-At any time, a stratum maintains two in-memory buffer for each stratum, one for storing examples that are waiting to be written back to disk (`IncomingMemBuffer`), and the other for storing examples that are loaded into memory for the sampler (described below) to sample from (`OutgoingMemBuffer`).
-
 * `DiskBuffer`: A file on disk that stores the majority of training examples.
 * `NumExamplesPerSlot`: The capacity of a slot. The slots are basic unit for writing examples back to disk. The training examples are written into and reading out from the disk one block at a time.
 * `WeightsTable`: The weight distribution of strata, constantly being updated.
-* `UpdatedExamplesQueue`: The queue between the Samplers and the Selectors (described below) for sending training examples with updated scores.
-* `SampledExamplesQueue`: The queue between the Samplers and the BufferLoader for sending sampled examples with regard to the latest model.
-* `LastModelQueue`: The queue between the Boosting Learner and the Samplers to send the latest ensemble.
 
 
 #### The Methods for Updating and Sampling in StratifiedStorage
@@ -127,10 +158,8 @@ Procedure RunAssigner():
   <Run this procedure in an independent thread>
   WHILE True DO
     ScoredExample = UpdatedExamplesQueue.BlockingRead()
-    Weight = GetWeight(ScoredExample.LabeledData.Label, ScoredExample.LastScore)
-    Index = Log2(Weight)
-    Strata.StratumMap[Index].IncomingMemBuffer.BlockingWrite(ScoredExample)
-    WeightsTable[Index] += Weight
+    <Write ScoredExample to the InQueue of the corresponding stratum>
+    <Update WeightTable>
   END
 END
 
@@ -139,17 +168,18 @@ Procedure RunSampler():
   LastGridVals = Map()
   WHILE True DO
     Index = <Sample a stratum using weighted sampling w.r.t. WeightsTable>
-    OutgoingMemBuffer = Strata.StratumMap[Index].OutgoingMemBuffer
+    OutQueue = Strata.StratumMap[Index].OutQueue
     LastGrid = LastGridVals[Index]
     GridSize = 2^(Index + 1)
     WHILE True DO
-      ScoredExample = OutgoingMemBuffer.BlockingRead()
+      ScoredExample = OutQueue.BlockingRead()
       OutdatedScore = ScoredExample.LastScore
-      WeightsTable[Index] -= GetWeight(ScoredExample.LabeledData.Label, OutdatedScore)
       Model = LastModelQueue.Read()
       UpdatedScore = Model.Update(ScoredExample)
-      UpdatedScoreExample = (ScoredExample.LabeledData, UpdatedScore, Size(Model))
-      UpdatedExamplesQueue.Enqueue(UpdatedScoreExample)
+
+      <Update WeightTable>
+      <Send Updated Example to UpdatedExampleQueue>
+
       LastGrid += GetWeight(ScoredExample.LabeledData.Label, UpdatedScore)
       IF LastGrid >= GridSize DO
         SampledExample = UpdatedScoreExample
@@ -167,14 +197,14 @@ END
 
 #### Low Level Procedures for Maintaining a Single Stratum
 
-There are two threads running for the strata, one for writing examples in the `IncomingMemBuffer` back to disk, the other for loading examples from disk to the `OutgoingMemBuffer`. Both queues have fixed size, so once they are full, the corresponding threads would pause and wait for their availabilities.
+There are two threads running for the strata, one for writing examples in the `InQueue` back to disk, the other for loading examples from disk to the `OutQueue`. Both queues have fixed size, so once they are full, the corresponding threads would pause and wait for their availabilities.
 
 ```
 Procedure StratumEnqueue():
   <Run this procedure in an independent thread for every Stratum>
   Buffer = Array[]
   WHILE True DO
-    Example = IncomingMemBuffer.BlockingRead()
+    Example = InQueue.BlockingRead()
     Buffer.Append(Example)
     IF LENGTH(Buffer) >= NumExamplesPerSlot DO
       <Write the examples in Buffer to a FREE block on Disk>
@@ -194,16 +224,24 @@ Procedure StratumDequeue():
       <Mark the read block on disk as FREE>
     END
     Example = <Next example in Buffer>
-    OutgoingMemBuffer.BlockingWrite(Example)
+    OutQueue.BlockingWrite(Example)
   END
 END
 ```
 
 ## Scanner
 
+Scanner works in two threads.
+
+1. The thread for the `BufferLoader` updates the examples in the BufferLoader from `StratifiedStorage`.
+2. The thread for the `Booster` updates the statistics of the weak rules after reading in
+the examples from the `BufferLoader`.
+
+
 ### BufferLoader
 
-`BufferLoader` is an in-memory data loader to efficiently provide training examples to the learning algorithm. It maintains a weighted sample of the training dataset with regard to the latest ensemble model. In a separate thread, it constantly gather newly sampled examples from the stratified storage to replace its current sample set.
+`BufferLoader` is an in-memory data loader to efficiently provide training examples to the learning algorithm. It maintains a weighted sample of the training dataset with regard to the latest ensemble model.
+Internally, it constantly gather newly sampled examples from the stratified storage to replace its current sample set.
 
 #### Structure
 
@@ -243,15 +281,15 @@ Update the scores of all examples after a new rule is added to the ensemble.
 Procedure UpdateScores(Model):
   ModelSize = <Number of Trees in Model>
   FOR SampledExample IN LoadedData DO
-    FOR Tree IN Model[SampledExample.LastTreeIndex...ModelSize] DO
-      SampledExample.LastScore += Tree.Predict(SampledExample.LabeledData.Feature)
-    END
+    <Query the new rules from LastTreeIndex to the latest>
+    SampledExample.LastScore += <predictions from the new rules>
     SampledExample.LastTreeIndex = ModelSize
   END
 END
 ```
 
-Update effective sample size of current sample.
+Update effective sample size of current sample. In case that ESS is too small, Booster can stop training and waiting
+for BufferLoader to gather a new sample set with a large ESS.
 
 ```
 Procedure UpdateESS():
