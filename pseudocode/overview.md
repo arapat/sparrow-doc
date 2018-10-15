@@ -150,6 +150,8 @@ StratifiedStorage := (Strata, WeightsTable, UpdatedExamplesQueue, SampledExample
 
 #### The Methods for Updating and Sampling in StratifiedStorage
 
+**Yoav:** I am not quite sure why RunAssigner and RunSampler are separate.
+
 ```
 Procedure StartStratifiedStorage():
   RunAssigner()
@@ -161,7 +163,7 @@ Procedure RunAssigner():
   WHILE True DO
     ScoredExample = UpdatedExamplesQueue.BlockingRead()
     <Write ScoredExample to the InQueue of the corresponding stratum>
-    <Update WeightTable>
+    <Update WeightTable> (This is done in a non-blocking way. In addition, it should be done after aggregating several updates, and the atomic action should be Read - Add - store)
   END
 END
 
