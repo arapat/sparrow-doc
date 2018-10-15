@@ -147,6 +147,9 @@ StratifiedStorage := (Strata, WeightsTable, UpdatedExamplesQueue, SampledExample
 * `NumExamplesPerSlot`: The capacity of a slot. The slots are basic unit for writing examples back to disk. The training examples are written into and reading out from the disk one block at a time.
 * `WeightsTable`: The weight distribution of strata, constantly being updated.
 
+The `WeightsTable` is a [lock-free map](https://github.com/jonhoo/rust-evmap),
+i.e. even though it is shared among multiple threads, the read/write operations are both non-blocking.
+
 
 #### The Methods for Updating and Sampling in StratifiedStorage
 
@@ -161,7 +164,7 @@ Procedure RunAssigner():
   WHILE True DO
     ScoredExample = UpdatedExamplesQueue.BlockingRead()
     <Write ScoredExample to the InQueue of the corresponding stratum>
-    <Update WeightTable>
+    <Update WeightsTable (non-blocking)>
   END
 END
 
@@ -179,7 +182,7 @@ Procedure RunSampler():
       Model = LastModelQueue.Read()
       UpdatedScore = Model.Update(ScoredExample)
 
-      <Update WeightTable>
+      <Update WeightsTable (non-blocking)>
       <Send Updated Example to UpdatedExampleQueue>
 
       LastGrid += GetWeight(ScoredExample.LabeledData.Label, UpdatedScore)
